@@ -17,7 +17,12 @@ from dbt.adapters.redshift.auth_providers import create_token_service_client
 from dbt_common.contracts.util import Replaceable
 from dbt_common.dataclass_schema import dbtClassMixin, StrEnum, ValidationError
 from dbt_common.helper_types import Port
-from dbt_common.exceptions import DbtRuntimeError, CompilationError, DbtDatabaseError
+from dbt_common.exceptions import (
+    DbtRuntimeError,
+    CompilationError,
+    DbtDatabaseError,
+    DbtInternalError,
+)
 
 if TYPE_CHECKING:
     # Indirectly imported via agate_helper, which is lazy loaded further downfile.
@@ -48,7 +53,10 @@ class RedshiftConnectionMethod(StrEnum):
 
     @classmethod
     def uses_identity_center(cls, method: str) -> bool:
-        return method in (cls.IAM_IDENTITY_CENTER_BROWSER, cls.IAM_IDENTITY_CENTER_TOKEN)
+        return method in (
+            cls.IAM_IDENTITY_CENTER_BROWSER,
+            cls.IAM_IDENTITY_CENTER_TOKEN,
+        )
 
     @classmethod
     def is_iam(cls, method: str) -> bool:
@@ -140,6 +148,16 @@ class RedshiftCredentials(Credentials):
     access_key_id: Optional[str] = None
     secret_access_key: Optional[str] = None
 
+    # EMR Spark
+    s3_uri: Optional[str] = None
+    emr_job_execution_role_arn: Optional[str] = None
+    emr_application_id: Optional[str] = None
+    emr_application_name: Optional[str] = None
+    aws_session_token: Optional[str] = None
+    poll_interval: float = 1.0
+    num_retries: int = 5
+    num_boto3_retries: Optional[int] = None
+
     #
     # IAM identity center methods
     #
@@ -175,8 +193,6 @@ class RedshiftCredentials(Credentials):
             "schema",
             "sslmode",
             "region",
-            "sslmode",
-            "region",
             "autocreate",
             "db_groups",
             "ra3_node",
@@ -185,11 +201,22 @@ class RedshiftCredentials(Credentials):
             "retries",
             "autocommit",
             "access_key_id",
+            "s3_uri",
+            "emr_job_execution_role_arn",
+            "emr_application_id",
+            "emr_application_name",
+            "poll_interval",
+            "num_retries",
+            "num_boto3_retries",
         )
 
     @property
     def unique_field(self) -> str:
         return self.host
+
+    @property
+    def effective_num_retries(self) -> int:
+        return self.num_boto3_retries or self.num_retries
 
 
 def get_connection_method(
@@ -200,7 +227,9 @@ def get_connection_method(
     #
     def __validate_required_fields(method_name: str, required_fields: Tuple[str, ...]):
         missing_fields: List[str] = [
-            field for field in required_fields if getattr(credentials, field, None) is None
+            field
+            for field in required_fields
+            if getattr(credentials, field, None) is None
         ]
         if missing_fields:
             fields_str: str = "', '".join(missing_fields)
@@ -229,8 +258,9 @@ def get_connection_method(
         iam: bool = RedshiftConnectionMethod.is_iam(credentials.method)
 
         cluster_identifier: Optional[str]
-        if "serverless" in credentials.host or RedshiftConnectionMethod.uses_identity_center(
-            credentials.method
+        if (
+            "serverless" in credentials.host
+            or RedshiftConnectionMethod.uses_identity_center(credentials.method)
         ):
             cluster_identifier = None
         elif credentials.cluster_id:
@@ -297,7 +327,9 @@ def get_connection_method(
         return __iam_kwargs(credentials) | role_kwargs
 
     def __iam_idc_browser_kwargs(credentials) -> Dict[str, Any]:
-        logger.debug("Connecting to Redshift with '{credentials.method}' credentials method")
+        logger.debug(
+            "Connecting to Redshift with '{credentials.method}' credentials method"
+        )
 
         __IDP_TIMEOUT: int = 60
         __LISTEN_PORT_DEFAULT: int = 7890
@@ -336,7 +368,9 @@ def get_connection_method(
         tested. It can be added with a presenting use-case.
         """
 
-        logger.debug("Connecting to Redshift with '{credentials.method}' credentials method")
+        logger.debug(
+            "Connecting to Redshift with '{credentials.method}' credentials method"
+        )
 
         __validate_required_fields("oauth_token_identity_center", ("token_endpoint",))
 
@@ -373,7 +407,9 @@ def get_connection_method(
             method_to_kwargs_function[credentials.method]
         )
     except KeyError:
-        raise FailedToConnectError(f"Invalid 'method' in profile: '{credentials.method}'")
+        raise FailedToConnectError(
+            f"Invalid 'method' in profile: '{credentials.method}'"
+        )
 
     kwargs: Dict[str, Any] = kwargs_function(credentials)
 
@@ -426,7 +462,9 @@ class RedshiftConnectionManager(SQLConnectionManager):
             yield
         except redshift_connector.DatabaseError as e:
             try:
-                err_msg = e.args[0]["M"]  # this is a type redshift sets, so we must use these keys
+                err_msg = e.args[0][
+                    "M"
+                ]  # this is a type redshift sets, so we must use these keys
             except Exception:
                 err_msg = str(e).strip()
             logger.debug(f"Redshift error: {err_msg}")
@@ -564,3 +602,17 @@ class RedshiftConnectionManager(SQLConnectionManager):
 
         if hasattr(Lexer, "get_default_instance"):
             Lexer.get_default_instance()
+
+    def commit(self, ignore=False):
+        try:
+            return super().commit()
+        except DbtInternalError as e:
+            error_message = str(e)
+            if ignore and (
+                "Tried to commit transaction on connection" in error_message
+                and "but it does not have one open!" in error_message
+            ):
+                logger.warning(f"Warning: Ignoring commit error - {e}")
+                return None  # Or some other appropriate return value
+            else:
+                raise

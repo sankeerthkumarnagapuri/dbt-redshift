@@ -70,6 +70,7 @@ def materialize(spark_session, df, target_relation):
         .option("tempdir", "{{ s3_uri }}") \
         .option("forward_spark_s3_credentials", "true") \
         .option("tempformat", "PARQUET") \
+        .option("unload_s3_format", "PARQUET") \
         .mode("overwrite") \
         .save()
 
@@ -83,13 +84,14 @@ def get_spark_df(identifier):
     """
     Override the arguments to ref and source dynamically
     """
-    read_table = ".".join(identifier.split(".")[1:])
+    read_table = ".".join(identifier.split("."))
     df_read = spark.read \
         .format("io.github.spark_redshift_community.spark.redshift") \
         .option("url", "{{ url }}") \
         .option("dbtable", read_table) \
         .option("tempdir", "{{ s3_uri }}") \
         .option("tempformat", "PARQUET") \
+        .option("unload_s3_format", "PARQUET") \
         .option("forward_spark_s3_credentials", "true") \
         .load()
     return df_read

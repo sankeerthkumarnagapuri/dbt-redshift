@@ -44,6 +44,7 @@ class EmrServerlessJobHelper(PythonJobHelper):
         self.spark_connection = EmrServerlessSparkSessionManager(credentials)
         self.s3_log_prefix = "logs"
         self.app_type = "SPARK"  # EMR Serverless also supports jobs of type 'HIVE'
+        self.pwd = credentials.password
 
     @cached_property
     def timeout(self) -> int:
@@ -292,7 +293,12 @@ class EmrServerlessJobHelper(PythonJobHelper):
                     applicationId=self.application_id,
                     executionRoleArn=self.job_execution_role_arn,
                     executionTimeoutMinutes=self.timeout,
-                    jobDriver={"sparkSubmit": {"entryPoint": script_location}},
+                    jobDriver={
+                        "sparkSubmit": {
+                            "entryPoint": script_location,
+                            "sparkSubmitParameters": f"--conf spark.emr-serverless.driverEnv.MDATA_DB_PASSWORD={self.pwd} --conf spark.executorEnv.MDATA_DB_PASSWORD={self.pwd}"
+                            }
+                        },
                     configurationOverrides={
                         "monitoringConfiguration": {
                             "s3MonitoringConfiguration": {
@@ -306,7 +312,7 @@ class EmrServerlessJobHelper(PythonJobHelper):
                             }
                         ],
                     },
-                    name=self.relation_name,
+                    name=self.relation_name.replace('"', ''),
                     tags={"invocation_id": self.invocation_id},
                 )
             except Exception as e:

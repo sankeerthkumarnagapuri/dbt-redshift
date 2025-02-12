@@ -2,7 +2,6 @@
     {%- set submission_method = config.get('submission_method', default='emr_serverless') -%}
     {%- set s3_uri = config.get('s3_uri', default=target.s3_uri) -%}
     {%- set host = config.get('host', default=target.host) -%}
-    {%- set password = config.get('password', default=target.password or 'Uo)f33cvGLFq>W4h') -%}
     {%- set port = config.get('port', default=target.port) -%}
     {%- set dbname = config.get('dbname', default=target.dbname) -%}
 
@@ -16,8 +15,13 @@
 {% endif %}
 
 {%- set url -%}
-jdbc:redshift://{{ host }}:{{ port }}/{{ dbname }}?user={{ target.user }}&password={{ password }}
+jdbc:redshift://{{ host }}:{{ port }}/{{ dbname }}?user={{ target.user }}
 {%- endset -%}
+
+def get_url(url):
+    import os
+    db_password = os.getenv("MDATA_DB_PASSWORD")
+    return f"{url}&password={db_password}"
 
 {{-"\n"-}}
 import pyspark
@@ -62,10 +66,11 @@ def materialize(spark_session, df, target_relation):
     else:
         msg = f"{type(df)} is not a supported type for dbt Python materialization"
         raise Exception(msg)
+    url = get_url("{{ url }}")
 
     df.write \
         .format("io.github.spark_redshift_community.spark.redshift") \
-        .option("url", "{{ url }}") \
+        .option("url", url) \
         .option("dbtable", "{{ table }}") \
         .option("tempdir", "{{ s3_uri }}") \
         .option("forward_spark_s3_credentials", "true") \
@@ -80,14 +85,24 @@ def materialize(spark_session, df, target_relation):
 
 {%- macro redshift__py_read_spark_df(table, url, s3_uri) -%}
 {{-"\n"-}}
+import re
+
 def get_spark_df(identifier):
     """
     Override the arguments to ref and source dynamically
     """
-    read_table = ".".join(identifier.split("."))
+
+    db_name = identifier.split(".")[0].replace('"', '')
+    read_table = ".".join(identifier.split(".")[1:]).replace('"', '')
+
+    url = "{{ url }}"
+    pattern = r"(//[^:/]+:\d+/)([^?]+)"  
+    url = re.sub(pattern, rf"\1{db_name}", url)
+    url = get_url(url)
+
     df_read = spark.read \
         .format("io.github.spark_redshift_community.spark.redshift") \
-        .option("url", "{{ url }}") \
+        .option("url", url) \
         .option("dbtable", read_table) \
         .option("tempdir", "{{ s3_uri }}") \
         .option("tempformat", "PARQUET") \
